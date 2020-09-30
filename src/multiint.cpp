@@ -183,6 +183,7 @@ struct DisplayPlayerCache {
 	WzText		wzMainText;		// the main text
 
 	WzText		wzSubText;		// the sub text (used for players)
+	WzText		wzEloText;      // the elo text (used for players)
 };
 struct DisplayPositionCache {
 	WzText wzPositionText;
@@ -308,13 +309,13 @@ void loadMultiScripts()
 	WzString ininame = challengeActive ? sRequestResult : aFileName;
 	WzString path = challengeActive ? "challenges/" : aPathName;
 
-	if (hostlaunch == 2)
+	if (hostlaunch == HostLaunch::Skirmish)
 	{
 		ininame = "tests/" + WzString::fromUtf8(wz_skirmish_test());
 		path = "tests/";
 	}
 
-	if (hostlaunch == 3)
+	if (hostlaunch == HostLaunch::Autohost)
 	{
 		ininame = "autohost/" + WzString::fromUtf8(wz_skirmish_test());
 		path = "autohost/";
@@ -2367,16 +2368,9 @@ void WzMultiplayerOptionsTitleUI::addPlayerBox(bool players)
 					{
 						sButInit.pTip += "\n";
 					}
-					EcKey::Key bytes = getMultiStats(i).identity.toBytes(EcKey::Public);
+					std::string hash = getMultiStats(i).identity.publicHashString();
 					sButInit.pTip += _("Player ID: ");
-					if (!bytes.empty())
-					{
-						sButInit.pTip += sha256Sum(&bytes[0], bytes.size()).toString().substr(0, 20).c_str();
-					}
-					else
-					{
-						sButInit.pTip += _("(none)");
-					}
+					sButInit.pTip += hash.empty()? _("(none)") : hash;
 				}
 				sButInit.pDisplay = displayPlayer;
 				sButInit.UserData = i;
@@ -2646,7 +2640,7 @@ static void loadMapChallengeSettings(WzConfig& ini)
 	}
 	ini.endGroup();
 
-	const bool bIsAutoHostOrAutoGame = hostlaunch == 3 || hostlaunch == 2;
+	const bool bIsAutoHostOrAutoGame = hostlaunch == HostLaunch::Skirmish || hostlaunch == HostLaunch::Autohost;
 	if (challengeActive || bIsAutoHostOrAutoGame)
 	{
 		ini.beginGroup("challenge");
@@ -2796,23 +2790,34 @@ static void loadMapPlayerSettings(WzConfig& ini)
 	}
 }
 
+static int playersPerTeam()
+{
+	for (unsigned numTeams = game.maxPlayers - 1; numTeams > 1; --numTeams)
+	{
+		if (game.maxPlayers % numTeams == 0)
+		{
+			return numTeams;
+		}
+	}
+	return 1;
+}
+
 /**
  * Resets all player difficulties, positions, teams and colors etc.
  */
-static void resetPlayerConfiguration()
+static void resetPlayerConfiguration(const bool bShouldResetLocal = false)
 {
 	for (unsigned playerIndex = 0; playerIndex < MAX_PLAYERS; playerIndex++)
 	{
 		setPlayerColour(playerIndex, playerIndex);
 
-		/* Never touch the local player */
-		if (playerIndex == selectedPlayer)
+		if (!bShouldResetLocal && playerIndex == selectedPlayer)
 		{
 			continue;
 		}
 
 		NetPlay.players[playerIndex].position = playerIndex;
-		NetPlay.players[playerIndex].team = playerIndex;
+		NetPlay.players[playerIndex].team = playerIndex / playersPerTeam();
 		NetPlay.players[playerIndex].name[0] = '\0';
 
 		if (NetPlay.bComms)
@@ -2845,11 +2850,11 @@ static void loadMapChallengeAndPlayerSettings(bool forceLoadPlayers = false)
 	sstrcat(aFileName, ".json");
 
 	WzString ininame = challengeActive ? sRequestResult : aFileName;
-	if (hostlaunch == 2)
+	if (hostlaunch == HostLaunch::Skirmish)
 	{
 		ininame = "tests/" + WzString::fromUtf8(wz_skirmish_test());
 	}
-	if (hostlaunch == 3)
+	if (hostlaunch == HostLaunch::Autohost)
 	{
 		ininame = "autohost/" + WzString::fromUtf8(wz_skirmish_test());
 	}
@@ -3020,7 +3025,7 @@ bool WzMultiplayerOptionsTitleUI::startHost()
 	resetReadyStatus(false);
 	removeWildcards((char*)sPlayer);
 
-	const bool bIsAutoHostOrAutoGame = hostlaunch == 3 || hostlaunch == 2;
+	const bool bIsAutoHostOrAutoGame = hostlaunch == HostLaunch::Skirmish || hostlaunch == HostLaunch::Autohost;
 	if (!hostCampaign((char*)game.name, (char*)sPlayer, bIsAutoHostOrAutoGame))
 	{
 		addConsoleMessage(_("Sorry! Failed to host the game."), DEFAULT_JUSTIFY, SYSTEM_MESSAGE);
@@ -3289,7 +3294,7 @@ void WzMultiplayerOptionsTitleUI::processMultiopWidgets(UDWORD id)
 
 	case CON_CANCEL:
 		pie_LoadBackDrop(SCREEN_RANDOMBDROP);
-		hostlaunch = 0; // Dont load the autohost file on subsequent hosts
+		hostlaunch = HostLaunch::Normal; // Dont load the autohost file on subsequent hosts
 		performedFirstStart = false; // Reset everything
 		if (!challengeActive)
 		{
@@ -4107,7 +4112,7 @@ void WzMultiplayerOptionsTitleUI::start()
 	/* Entering the first time */
 	if (!bReenter)
 	{
-		resetPlayerConfiguration();
+		resetPlayerConfiguration(true);
 		memset(&locked, 0, sizeof(locked));
 		loadMapChallengeAndPlayerSettings(true);
 		game.isMapMod = false;
@@ -4156,14 +4161,14 @@ void WzMultiplayerOptionsTitleUI::start()
 		updateLimitIcons();
 	}
 
-	if (autogame_enabled() || hostlaunch == 3)
+	if (autogame_enabled() || hostlaunch == HostLaunch::Autohost)
 	{
 		if (!ingame.localJoiningInProgress)
 		{
 			processMultiopWidgets(MULTIOP_HOST);
 		}
 		SendReadyRequest(selectedPlayer, true);
-		if (hostlaunch == 2)
+		if (hostlaunch == HostLaunch::Skirmish)
 		{
 			startMultiplayerGame();
 			// reset flag in case people dropped/quit on join screen
@@ -4285,9 +4290,9 @@ void displayPlayer(WIDGET *psWidget, UDWORD xOffset, UDWORD yOffset)
 	assert(psWidget->pUserData != nullptr);
 	DisplayPlayerCache& cache = *static_cast<DisplayPlayerCache *>(psWidget->pUserData);
 
-	int x = xOffset + psWidget->x();
-	int y = yOffset + psWidget->y();
-	UDWORD		j = psWidget->UserData, eval;
+	int const x = xOffset + psWidget->x();
+	int const y = yOffset + psWidget->y();
+	unsigned const j = psWidget->UserData;
 
 	const int nameX = 32;
 
@@ -4364,87 +4369,73 @@ void displayPlayer(WIDGET *psWidget, UDWORD xOffset, UDWORD yOffset)
 			}
 			subText += buf;
 		}
-		cache.wzMainText.render(x + nameX, y + (subText.empty() ? 22 : 18), colour);
+
+		PLAYERSTATS stat = getMultiStats(j);
+		auto ar = stat.autorating;
+		if (!ar.valid)
+		{
+			ar.dummy = stat.played < 5;
+			// star 1 total droid kills
+			ar.star[0] = stat.totalKills > 600? 1 : stat.totalKills > 300? 2 : stat.totalKills > 150? 3 : 0;
+
+			// star 2 games played
+			ar.star[1] = stat.played > 200? 1 : stat.played > 100? 2 : stat.played > 50? 3 : 0;
+
+			// star 3 games won.
+			ar.star[2] = stat.wins > 80? 1 : stat.wins > 40? 2 : stat.wins > 10? 3 : 0;
+
+			// medals.
+			ar.medal = stat.wins >= 24 && stat.wins > 8 * stat.losses? 1 : stat.wins >= 12 && stat.wins > 4 * stat.losses? 2 : stat.wins >= 6 && stat.wins > 2 * stat.losses? 3 : 0;
+
+			ar.level = 0;
+			ar.elo.clear();
+		}
+
+		int H = 5;
+		cache.wzMainText.render(x + nameX, y + 22 - H*!subText.empty() - H*ar.valid, colour);
 		if (!subText.empty())
 		{
 			cache.wzSubText.setText(subText, font_small);
-			cache.wzSubText.render(x + nameX, y + 28, WZCOL_TEXT_MEDIUM);
+			cache.wzSubText.render(x + nameX, y + 28 - H*!ar.elo.empty(), WZCOL_TEXT_MEDIUM);
 		}
 
-		PLAYERSTATS stat = getMultiStats(j);
-		if (stat.played < 5)
+		if (ar.dummy)
 		{
 			iV_DrawImage(FrontImages, IMAGE_MEDAL_DUMMY, x + 4, y + 13);
 		}
 		else
 		{
-			PLAYERSTATS stat = getMultiStats(j);
-
-			// star 1 total droid kills
-			eval = stat.totalKills;
-			if (eval > 600)
+			constexpr int starImgs[4] = {0, IMAGE_MULTIRANK1, IMAGE_MULTIRANK2, IMAGE_MULTIRANK3};
+			if (1 <= ar.star[0] && ar.star[0] < ARRAY_SIZE(starImgs))
 			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK1, x + 4, y + 3);
+				iV_DrawImage(FrontImages, starImgs[ar.star[0]], x + 4, y + 3);
 			}
-			else if (eval > 300)
+			if (1 <= ar.star[1] && ar.star[1] < ARRAY_SIZE(starImgs))
 			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK2, x + 4, y + 3);
+				iV_DrawImage(FrontImages, starImgs[ar.star[1]], x + 4, y + 13);
 			}
-			else if (eval > 150)
+			if (1 <= ar.star[2] && ar.star[2] < ARRAY_SIZE(starImgs))
 			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK3, x + 4, y + 3);
+				iV_DrawImage(FrontImages, starImgs[ar.star[2]], x + 4, y + 23);
 			}
-
-			// star 2 games played
-			eval = stat.played;
-			if (eval > 200)
+			constexpr int medalImgs[4] = {0, IMAGE_MEDAL_GOLD, IMAGE_MEDAL_SILVER, IMAGE_MEDAL_BRONZE};
+			if (1 <= ar.medal && ar.medal < ARRAY_SIZE(medalImgs))
 			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK1, x + 4, y + 13);
-			}
-			else if (eval > 100)
-			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK2, x + 4, y + 13);
-			}
-			else if (eval > 50)
-			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK3, x + 4, y + 13);
-			}
-
-			// star 3 games won.
-			eval = stat.wins;
-			if (eval > 80)
-			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK1, x + 4, y + 23);
-			}
-			else if (eval > 40)
-			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK2, x + 4, y + 23);
-			}
-			else if (eval > 10)
-			{
-				iV_DrawImage(FrontImages, IMAGE_MULTIRANK3, x + 4, y + 23);
-			}
-
-			// medals.
-			if ((stat.wins >= 6) && (stat.wins > (2 * stat.losses))) // bronze requirement.
-			{
-				if ((stat.wins >= 12) && (stat.wins > (4 * stat.losses))) // silver requirement.
-				{
-					if ((stat.wins >= 24) && (stat.wins > (8 * stat.losses))) // gold requirement
-					{
-						iV_DrawImage(FrontImages, IMAGE_MEDAL_GOLD, x + 16, y + 11);
-					}
-					else
-					{
-						iV_DrawImage(FrontImages, IMAGE_MEDAL_SILVER, x + 16, y + 11);
-					}
-				}
-				else
-				{
-					iV_DrawImage(FrontImages, IMAGE_MEDAL_BRONZE, x + 16, y + 11);
-				}
+				iV_DrawImage(FrontImages, medalImgs[ar.star[2]], x + 16 - 2*(ar.level != 0), y + 11);
 			}
 		}
+		constexpr int levelImgs[9] = {0, IMAGE_LEV_0, IMAGE_LEV_1, IMAGE_LEV_2, IMAGE_LEV_3, IMAGE_LEV_4, IMAGE_LEV_5, IMAGE_LEV_6, IMAGE_LEV_7};
+		if (1 <= ar.level && ar.level < ARRAY_SIZE(levelImgs))
+		{
+			iV_DrawImage(IntImages, levelImgs[ar.star[2]], x + 24, y + 15);
+		}
+
+		if (!ar.elo.empty())
+		{
+			cache.wzEloText.setText(ar.elo, font_small);
+			cache.wzEloText.render(x + nameX, y + 28 + H*!subText.empty(), WZCOL_TEXT_BRIGHT);
+		}
+
 		NetPlay.players[j].difficulty = AIDifficulty::HUMAN;
 	}
 	else	// AI

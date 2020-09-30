@@ -144,6 +144,7 @@ struct NET_PLAYER_DATA
 
 NETPLAY	NetPlay;
 PLAYER_IP	*IPlist = nullptr;
+static int IPlistLast = 0;
 static bool		allow_joining = false;
 static	bool server_not_there = false;
 static GAMESTRUCT	gamestruct;
@@ -381,7 +382,7 @@ void NET_InitPlayer(int i, bool initPosition, bool initTeams)
 {
 	initPlayerNetworkProps(i);
 
-	NetPlay.players[i].difficulty = AIDifficulty::DEFAULT;
+	NetPlay.players[i].difficulty = AIDifficulty::DISABLED;
 	if (ingame.localJoiningInProgress)
 	{
 		// only clear name outside of games.
@@ -1240,6 +1241,7 @@ int NETshutdown()
 		free(IPlist);
 	}
 	IPlist = nullptr;
+	IPlistLast = 0;
 	if (NetPlay.MOTD)
 	{
 		free(NetPlay.MOTD);
@@ -3052,6 +3054,31 @@ static void NETallowJoining()
 	}
 }
 
+void NETloadBanList() {
+	char BanListPath[4096] = {0};
+	strncpy(BanListPath, PHYSFS_getWriteDir(), 4095);
+	size_t BanListAppendFname = strlen(BanListPath);
+	strncpy(BanListPath+BanListAppendFname, "/banlist.txt", 4095-BanListAppendFname);
+	FILE* f = fopen(BanListPath, "r");
+	if(f == NULL) {
+		return;
+	}
+	debug(LOG_INFO, "Reading banlist file: [%s]\n", BanListPath);
+	char BanStringBuf[2048] = {0};
+	char ToBanIP[256] = {0};
+	char ToBanName[256] = {0};
+	while(fgets(BanStringBuf, sizeof(BanStringBuf)-1, f)) {
+		if(sscanf(BanStringBuf, "%255s %255[^\n]", ToBanIP, ToBanName) != 2) {
+			if(strlen(BanStringBuf) > 2) {
+				debug(LOG_ERROR, "Error reading banlist file!\n");
+			}
+		} else {
+			addToBanList(ToBanIP, ToBanName);
+		}
+	}
+	return;
+}
+
 bool NEThostGame(const char *SessionName, const char *PlayerName,
                  SDWORD one, SDWORD two, SDWORD three, SDWORD four,
                  UDWORD plyrs)	// # of players.
@@ -3119,7 +3146,9 @@ bool NEThostGame(const char *SessionName, const char *PlayerName,
 	{
 		free(IPlist);
 		IPlist = nullptr;
+		IPlistLast = 0;
 	}
+	NETloadBanList();
 	sstrcpy(gamestruct.name, SessionName);
 	memset(&gamestruct.desc, 0, sizeof(gamestruct.desc));
 	gamestruct.desc.dwSize = sizeof(gamestruct.desc);
@@ -4279,8 +4308,6 @@ static bool onBanList(const char *ip)
  */
 static void addToBanList(const char *ip, const char *name)
 {
-	static int numBans = 0;
-
 	if (!IPlist)
 	{
 		IPlist = (PLAYER_IP *)malloc(sizeof(PLAYER_IP) * MAX_BANS + 1);
@@ -4289,16 +4316,16 @@ static void addToBanList(const char *ip, const char *name)
 			debug(LOG_FATAL, "Out of memory!");
 			abort();
 		}
-		numBans = 0;
+		IPlistLast = 0;
+		memset(IPlist, 0x0, sizeof(PLAYER_IP) * MAX_BANS);
 	}
-	memset(IPlist, 0x0, sizeof(PLAYER_IP) * MAX_BANS);
-	sstrcpy(IPlist[numBans].IPAddress, ip);
-	sstrcpy(IPlist[numBans].pname, name);
-	numBans++;
+	sstrcpy(IPlist[IPlistLast].IPAddress, ip);
+	sstrcpy(IPlist[IPlistLast].pname, name);
+	IPlistLast++;
 	sync_counter.banned++;
-	if (numBans > MAX_BANS)
+	if (IPlistLast > MAX_BANS)
 	{
 		debug(LOG_INFO, "We have exceeded %d bans, resetting to 0", MAX_BANS);
-		numBans = 0;
+		IPlistLast = 0;
 	}
 }
